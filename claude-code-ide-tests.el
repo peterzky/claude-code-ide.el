@@ -136,6 +136,33 @@
 
 (provide (quote vterm))
 
+;; === Mock ghostel module ===
+(defvar ghostel-buffer-name nil)
+(defvar ghostel-enable-title-tracking t)
+(defvar ghostel-kill-buffer-on-exit t)
+(defvar ghostel--copy-mode-active nil)
+
+(defun ghostel (&optional _arg)
+  "Mock ghostel function for testing."
+  (let ((buffer (get-buffer-create (or ghostel-buffer-name "*ghostel*"))))
+    (set-buffer buffer)
+    (with-current-buffer buffer
+      (make-process :name "mock-ghostel"
+                    :buffer buffer
+                    :command '("true")
+                    :connection-type 'pty))
+    buffer))
+
+(defun ghostel--send-key (_key)
+  "Mock ghostel send function for testing."
+  nil)
+
+(defun ghostel--window-adjust-process-window-size (_process _windows)
+  "Mock ghostel resize handler for testing."
+  '(80 . 24))
+
+(provide (quote ghostel))
+
 ;; === Mock Emacs display functions ===
 (unless (fboundp 'display-buffer-in-side-window)
   (defun display-buffer-in-side-window (buffer _alist)
@@ -367,6 +394,21 @@ have completed before cleanup.  Waits up to 5 seconds."
       (should-error (claude-code-ide)
                     :type 'user-error))))
 
+(ert-deftest claude-code-ide-test-run-without-ghostel ()
+  "Test run command when ghostel is not available."
+  (let ((claude-code-ide--cli-available t)
+        (claude-code-ide-cli-path "echo")
+        (claude-code-ide-terminal-backend 'ghostel)
+        (orig-featurep (symbol-function 'featurep)))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (sym &rest _) (if (eq sym 'ghostel) nil (funcall orig-featurep sym))))
+              ((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (unless (eq feature 'ghostel)
+                   (require feature filename noerror)))))
+      (should-error (claude-code-ide)
+                    :type 'user-error))))
+
 (ert-deftest claude-code-ide-test-terminal-backend-selection ()
   "Test terminal backend selection and validation."
   ;; Test vterm backend
@@ -376,6 +418,10 @@ have completed before cleanup.  Waits up to 5 seconds."
   ;; Test eat backend
   (let ((claude-code-ide-terminal-backend 'eat))
     (should (eq claude-code-ide-terminal-backend 'eat)))
+
+  ;; Test ghostel backend
+  (let ((claude-code-ide-terminal-backend 'ghostel))
+    (should (eq claude-code-ide-terminal-backend 'ghostel)))
 
   ;; Test invalid backend
   (let ((claude-code-ide-terminal-backend 'invalid-backend)
@@ -391,7 +437,8 @@ have completed before cleanup.  Waits up to 5 seconds."
   (let ((vterm-string-sent nil)
         (vterm-escape-sent nil)
         (vterm-return-sent nil)
-        (eat-string-sent nil))
+        (eat-string-sent nil)
+        (ghostel-string-sent nil))
     (cl-letf (((symbol-function 'vterm-send-string)
                (lambda (str) (setq vterm-string-sent str)))
               ((symbol-function 'vterm-send-escape)
@@ -399,7 +446,9 @@ have completed before cleanup.  Waits up to 5 seconds."
               ((symbol-function 'vterm-send-return)
                (lambda () (setq vterm-return-sent t)))
               ((symbol-function 'eat-term-send-string)
-               (lambda (term str) (setq eat-string-sent str))))
+               (lambda (term str) (setq eat-string-sent str)))
+              ((symbol-function 'ghostel--send-key)
+               (lambda (str) (setq ghostel-string-sent str))))
 
       ;; Test vterm backend
       (let ((claude-code-ide-terminal-backend 'vterm))
@@ -426,7 +475,21 @@ have completed before cleanup.  Waits up to 5 seconds."
 
           (setq eat-string-sent nil)
           (claude-code-ide--terminal-send-return)
-          (should (equal eat-string-sent "\r")))))))
+          (should (equal eat-string-sent "\r"))))
+
+      ;; Test ghostel backend
+      (with-temp-buffer
+        (let ((claude-code-ide-terminal-backend 'ghostel))
+          (claude-code-ide--terminal-send-string "test")
+          (should (equal ghostel-string-sent "test"))
+
+          (setq ghostel-string-sent nil)
+          (claude-code-ide--terminal-send-escape)
+          (should (equal ghostel-string-sent "\e"))
+
+          (setq ghostel-string-sent nil)
+          (claude-code-ide--terminal-send-return)
+          (should (equal ghostel-string-sent "\r")))))))
 
 (ert-deftest claude-code-ide-test-send-prompt-command ()
   "Test the claude-code-ide-send-prompt command."
@@ -471,6 +534,7 @@ have completed before cleanup.  Waits up to 5 seconds."
   "Test terminal session creation with both backends."
   (let ((mock-vterm-buffer nil)
         (mock-eat-buffer nil)
+        (mock-ghostel-buffer nil)
         (mock-process (start-process "mock" nil "true")))
     (cl-letf (((symbol-function 'claude-code-ide--terminal-ensure-backend)
                (lambda () nil))  ; Mock the ensure function to do nothing
@@ -482,6 +546,10 @@ have completed before cleanup.  Waits up to 5 seconds."
               ((symbol-function 'eat-exec)
                (lambda (buffer name cmd startfile args)
                  (setq mock-eat-buffer buffer)))
+              ((symbol-function 'ghostel)
+               (lambda (&optional _arg)
+                 (setq mock-ghostel-buffer (get-buffer-create ghostel-buffer-name))
+                 (set-buffer mock-ghostel-buffer)))
               ((symbol-function 'get-buffer-process)
                (lambda (buffer) mock-process))
               ((symbol-function 'claude-code-ide-mcp-start)
@@ -509,7 +577,23 @@ have completed before cleanup.  Waits up to 5 seconds."
             (should (consp result))
             (should (bufferp (car result)))
             (should (processp (cdr result)))
-            (should (bufferp mock-eat-buffer))))))))
+            (should (bufferp mock-eat-buffer)))))
+
+      ;; Test ghostel backend session creation
+      (let ((claude-code-ide-terminal-backend 'ghostel)
+            (claude-code-ide--cli-available t))
+        (cl-letf (((symbol-function 'claude-code-ide--build-claude-command)
+                   (lambda (&rest _) "claude"))
+                  ((symbol-function 'claude-code-ide--terminal-send-string)
+                   (lambda (_string) nil))
+                  ((symbol-function 'claude-code-ide--terminal-send-return)
+                   (lambda () nil)))
+          (let ((result (claude-code-ide--create-terminal-session
+                         "*test-ghostel*" "/tmp" 12345 nil nil "test-session")))
+            (should (consp result))
+            (should (bufferp (car result)))
+            (should (processp (cdr result)))
+            (should (equal (buffer-name mock-ghostel-buffer) "*test-ghostel*"))))))))
 
 (ert-deftest claude-code-ide-test-vterm-smart-renderer-passthrough ()
   "Test that vterm smart renderer passes through normal text immediately."
