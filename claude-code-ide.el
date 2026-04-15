@@ -76,6 +76,8 @@
 (defvar ghostel-buffer-name)
 (defvar ghostel-enable-title-tracking)
 (defvar ghostel-kill-buffer-on-exit)
+(defvar ghostel-shell)
+(defvar ghostel-shell-integration)
 (defvar ghostel--copy-mode-active)
 
 ;; External function declarations for vterm
@@ -979,14 +981,17 @@ Signals an error if terminal fails to initialize."
 
      ;; ghostel backend
      ((eq claude-code-ide-terminal-backend 'ghostel)
+      ;; Ghostel always drives a shell; pin to a minimal /bin/sh with no
+      ;; shell-integration so rc files don't run, greetings/prompts don't
+      ;; render, and GHOSTEL_* integration env doesn't leak into Claude.
+      ;; The sh then `exec`s Claude, so only the Claude process remains.
       (let* ((process-environment (append env-vars process-environment))
              (ghostel-buffer-name buffer-name)
+             (ghostel-shell "/bin/sh")
+             (ghostel-shell-integration nil)
              (buffer nil))
-        ;; Ghostel manages a shell process; start the shell with our Claude env,
-        ;; then replace that shell with Claude so lifecycle tracking still works.
         (when-let ((stale-buffer (get-buffer buffer-name)))
-          (when (buffer-live-p stale-buffer)
-            (kill-buffer stale-buffer)))
+          (kill-buffer stale-buffer))
         (save-window-excursion
           (ghostel)
           (setq buffer (current-buffer)))
@@ -994,13 +999,20 @@ Signals an error if terminal fails to initialize."
           (error "Failed to create ghostel buffer.  Please ensure ghostel is properly installed"))
         (with-current-buffer buffer
           (setq-local ghostel-enable-title-tracking nil)
-          (setq-local ghostel-kill-buffer-on-exit t)
-          ;; Claude sessions are tracked by a stable buffer name.
-          (unless (equal (buffer-name buffer) buffer-name)
-            (rename-buffer buffer-name t))
+          ;; Let `claude-code-ide--cleanup-on-exit' be the single place that
+          ;; kills the buffer.  Otherwise ghostel's sentinel kills the buffer
+          ;; first, firing `kill-buffer-hook' → cleanup-on-exit, and then our
+          ;; wrapping sentinel runs cleanup-on-exit a second time.
+          (setq-local ghostel-kill-buffer-on-exit nil)
           (let ((process (get-buffer-process buffer)))
             (unless process
               (error "Failed to create ghostel process.  Please ensure ghostel is properly installed"))
+            ;; Chain ghostel's own sentinel so its buffer-local timers,
+            ;; focus-change hook, and `ghostel-exit-functions' still run
+            ;; when `claude-code-ide--start-session' installs its own
+            ;; sentinel on top.  Without this, ghostel teardown is skipped.
+            (process-put process 'claude-code-ide--ghostel-sentinel
+                         (process-sentinel process))
             (claude-code-ide--terminal-send-string (concat "exec " claude-cmd))
             (claude-code-ide--terminal-send-return)
             (cons buffer process)))))
@@ -1056,20 +1068,26 @@ This function handles:
                 (claude-code-ide--set-process process working-dir)
                 ;; Store session ID for cleanup
                 (puthash working-dir session-id claude-code-ide--session-ids)
-                ;; Set up process sentinel to clean up when Claude exits
-                (set-process-sentinel process
-                                      (lambda (_proc event)
-                                        ;; Check for abnormal exit with error code
-                                        (when (string-match "exited abnormally with code \\([0-9]+\\)" event)
-                                          (let ((exit-code (match-string 1 event)))
-                                            (claude-code-ide-debug "Claude process exited with code %s, event: %s"
-                                                                   exit-code event)
-                                            (message "Claude exited with error code %s" exit-code)))
-                                        (when (or (string-match "finished" event)
-                                                  (string-match "exited" event)
-                                                  (string-match "killed" event)
-                                                  (string-match "terminated" event))
-                                          (claude-code-ide--cleanup-on-exit working-dir))))
+                ;; Set up process sentinel to clean up when Claude exits.
+                ;; The ghostel backend stashes its native sentinel on the
+                ;; process so we can chain it here — otherwise ghostel's
+                ;; buffer-local timers and focus-change hook never tear down.
+                (let ((prev-sentinel (process-get process 'claude-code-ide--ghostel-sentinel)))
+                  (set-process-sentinel process
+                                        (lambda (proc event)
+                                          (when prev-sentinel
+                                            (ignore-errors (funcall prev-sentinel proc event)))
+                                          ;; Check for abnormal exit with error code
+                                          (when (string-match "exited abnormally with code \\([0-9]+\\)" event)
+                                            (let ((exit-code (match-string 1 event)))
+                                              (claude-code-ide-debug "Claude process exited with code %s, event: %s"
+                                                                     exit-code event)
+                                              (message "Claude exited with error code %s" exit-code)))
+                                          (when (or (string-match "finished" event)
+                                                    (string-match "exited" event)
+                                                    (string-match "killed" event)
+                                                    (string-match "terminated" event))
+                                            (claude-code-ide--cleanup-on-exit working-dir)))))
                 ;; Also add buffer kill hook as a backup
                 (with-current-buffer buffer
                   (add-hook 'kill-buffer-hook
