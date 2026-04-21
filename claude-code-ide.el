@@ -73,11 +73,8 @@
 (defvar vterm-environment)
 (defvar eat-term-name)
 (defvar vterm--process)
-(defvar ghostel-buffer-name)
 (defvar ghostel-enable-title-tracking)
 (defvar ghostel-kill-buffer-on-exit)
-(defvar ghostel-shell)
-(defvar ghostel-shell-integration)
 (defvar ghostel--copy-mode-active)
 
 ;; External function declarations for vterm
@@ -95,7 +92,7 @@
 (declare-function eat--adjust-process-window-size "eat" (process windows))
 
 ;; External function declarations for ghostel
-(declare-function ghostel "ghostel" (&optional arg))
+(declare-function ghostel-exec "ghostel" (buffer program &optional args))
 (declare-function ghostel--send-key "ghostel" (key))
 (declare-function ghostel--window-adjust-process-window-size "ghostel" (process windows))
 
@@ -229,8 +226,8 @@ display-buffer behavior."
 Can be `vterm', `eat', or `ghostel'.  The vterm backend is the default
 and provides a fully-featured terminal emulator.  The eat backend
 is an alternative terminal emulator that may work better in some
-environments.  The ghostel backend runs Claude inside a Ghostel shell
-session and then replaces that shell with the Claude process."
+environments.  The ghostel backend runs Claude directly in a Ghostel
+terminal."
   :type '(choice (const :tag "vterm" vterm)
                  (const :tag "eat" eat)
                  (const :tag "ghostel" ghostel))
@@ -476,7 +473,9 @@ cursor management, and process buffering for superior user experience."
     (unless (featurep 'ghostel)
       (require 'ghostel nil t))
     (unless (featurep 'ghostel)
-      (user-error "The package ghostel is not installed.  Please install the ghostel package or change `claude-code-ide-terminal-backend' to 'vterm or 'eat")))
+      (user-error "The package ghostel is not installed.  Please install the ghostel package or change `claude-code-ide-terminal-backend' to `vterm' or `eat'"))
+    (unless (fboundp 'ghostel-exec)
+      (user-error "The installed ghostel package does not provide `ghostel-exec'.  Please update ghostel or change `claude-code-ide-terminal-backend' to `vterm' or `eat'")))
    (t
     (user-error "Invalid terminal backend: %s.  Valid options are 'vterm, 'eat, or 'ghostel" claude-code-ide-terminal-backend))))
 
@@ -892,7 +891,7 @@ when navigating between terminal and other buffers."
               (recenter)))))))))
 
 (defun claude-code-ide--parse-command-string (command-string)
-  "Parse a command string into (program . args) for eat-exec.
+  "Parse a command string into (program . args) for terminal exec APIs.
 COMMAND-STRING is a shell command line to parse.
 Returns a cons cell (program . args) where program is the executable
 and args is a list of arguments."
@@ -981,30 +980,29 @@ Signals an error if terminal fails to initialize."
 
      ;; ghostel backend
      ((eq claude-code-ide-terminal-backend 'ghostel)
-      ;; Ghostel always drives a shell; pin to a minimal /bin/sh with no
-      ;; shell-integration so rc files don't run, greetings/prompts don't
-      ;; render, and GHOSTEL_* integration env doesn't leak into Claude.
-      ;; The sh then `exec`s Claude, so only the Claude process remains.
-      (let* ((process-environment (append env-vars process-environment))
-             (ghostel-buffer-name buffer-name)
-             (ghostel-shell "/bin/sh")
-             (ghostel-shell-integration nil)
+      (let* ((cmd-parts (claude-code-ide--parse-command-string claude-cmd))
+             (program (car cmd-parts))
+             (args (cdr cmd-parts))
              (buffer nil))
         (when-let ((stale-buffer (get-buffer buffer-name)))
           (kill-buffer stale-buffer))
-        (save-window-excursion
-          (ghostel)
-          (setq buffer (current-buffer)))
+        (setq buffer (get-buffer-create buffer-name))
         (unless (buffer-live-p buffer)
           (error "Failed to create ghostel buffer.  Please ensure ghostel is properly installed"))
         (with-current-buffer buffer
+          (setq default-directory working-dir)
           (setq-local ghostel-enable-title-tracking nil)
           ;; Let `claude-code-ide--cleanup-on-exit' be the single place that
           ;; kills the buffer.  Otherwise ghostel's sentinel kills the buffer
           ;; first, firing `kill-buffer-hook' → cleanup-on-exit, and then our
           ;; wrapping sentinel runs cleanup-on-exit a second time.
           (setq-local ghostel-kill-buffer-on-exit nil)
-          (let ((process (get-buffer-process buffer)))
+          (let* ((process-environment (append env-vars process-environment))
+                 (process (ghostel-exec buffer program args)))
+            ;; `ghostel-exec' switches the buffer into `ghostel-mode', which
+            ;; resets buffer-local variables.
+            (setq-local ghostel-enable-title-tracking nil)
+            (setq-local ghostel-kill-buffer-on-exit nil)
             (unless process
               (error "Failed to create ghostel process.  Please ensure ghostel is properly installed"))
             ;; Chain ghostel's own sentinel so its buffer-local timers,
@@ -1013,8 +1011,6 @@ Signals an error if terminal fails to initialize."
             ;; sentinel on top.  Without this, ghostel teardown is skipped.
             (process-put process 'claude-code-ide--ghostel-sentinel
                          (process-sentinel process))
-            (claude-code-ide--terminal-send-string (concat "exec " claude-cmd))
-            (claude-code-ide--terminal-send-return)
             (cons buffer process)))))
 
      (t

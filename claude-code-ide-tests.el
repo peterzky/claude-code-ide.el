@@ -153,6 +153,14 @@
                     :connection-type 'pty))
     buffer))
 
+(defun ghostel-exec (buffer _program &optional _args)
+  "Mock ghostel-exec function for testing."
+  (with-current-buffer buffer
+    (make-process :name "mock-ghostel"
+                  :buffer buffer
+                  :command '("true")
+                  :connection-type 'pty)))
+
 (defun ghostel--send-key (_key)
   "Mock ghostel send function for testing."
   nil)
@@ -535,6 +543,10 @@ have completed before cleanup.  Waits up to 5 seconds."
   (let ((mock-vterm-buffer nil)
         (mock-eat-buffer nil)
         (mock-ghostel-buffer nil)
+        (mock-ghostel-program nil)
+        (mock-ghostel-args nil)
+        (mock-ghostel-env nil)
+        (mock-ghostel-default-directory nil)
         (mock-process (start-process "mock" nil "true")))
     (cl-letf (((symbol-function 'claude-code-ide--terminal-ensure-backend)
                (lambda () nil))  ; Mock the ensure function to do nothing
@@ -546,10 +558,14 @@ have completed before cleanup.  Waits up to 5 seconds."
               ((symbol-function 'eat-exec)
                (lambda (buffer name cmd startfile args)
                  (setq mock-eat-buffer buffer)))
-              ((symbol-function 'ghostel)
-               (lambda (&optional _arg)
-                 (setq mock-ghostel-buffer (get-buffer-create ghostel-buffer-name))
-                 (set-buffer mock-ghostel-buffer)))
+              ((symbol-function 'ghostel-exec)
+               (lambda (buffer program &optional args)
+                 (setq mock-ghostel-buffer buffer)
+                 (setq mock-ghostel-program program)
+                 (setq mock-ghostel-args args)
+                 (setq mock-ghostel-env process-environment)
+                 (setq mock-ghostel-default-directory default-directory)
+                 mock-process))
               ((symbol-function 'get-buffer-process)
                (lambda (buffer) mock-process))
               ((symbol-function 'claude-code-ide-mcp-start)
@@ -583,17 +599,19 @@ have completed before cleanup.  Waits up to 5 seconds."
       (let ((claude-code-ide-terminal-backend 'ghostel)
             (claude-code-ide--cli-available t))
         (cl-letf (((symbol-function 'claude-code-ide--build-claude-command)
-                   (lambda (&rest _) "claude"))
-                  ((symbol-function 'claude-code-ide--terminal-send-string)
-                   (lambda (_string) nil))
-                  ((symbol-function 'claude-code-ide--terminal-send-return)
-                   (lambda () nil)))
+                   (lambda (&rest _) "claude --print \"hello world\"")))
           (let ((result (claude-code-ide--create-terminal-session
                          "*test-ghostel*" "/tmp" 12345 nil nil "test-session")))
             (should (consp result))
             (should (bufferp (car result)))
             (should (processp (cdr result)))
-            (should (equal (buffer-name mock-ghostel-buffer) "*test-ghostel*"))))))))
+            (should (equal (buffer-name mock-ghostel-buffer) "*test-ghostel*"))
+            (should (equal mock-ghostel-program "claude"))
+            (should (equal mock-ghostel-args '("--print" "hello world")))
+            (should (equal mock-ghostel-default-directory "/tmp"))
+            (should (member "CLAUDE_CODE_SSE_PORT=12345" mock-ghostel-env))
+            (should (member "TERM_PROGRAM=emacs" mock-ghostel-env))
+            (should (member "FORCE_CODE_TERMINAL=true" mock-ghostel-env))))))))
 
 (ert-deftest claude-code-ide-test-vterm-smart-renderer-passthrough ()
   "Test that vterm smart renderer passes through normal text immediately."
