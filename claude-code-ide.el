@@ -73,6 +73,7 @@
 (defvar vterm-environment)
 (defvar eat-term-name)
 (defvar vterm--process)
+(defvar ghostel-set-title-function)
 (defvar ghostel-enable-title-tracking)
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel--copy-mode-active)
@@ -478,6 +479,14 @@ cursor management, and process buffering for superior user experience."
       (user-error "The installed ghostel package does not provide `ghostel-exec'.  Please update ghostel or change `claude-code-ide-terminal-backend' to `vterm' or `eat'")))
    (t
     (user-error "Invalid terminal backend: %s.  Valid options are 'vterm, 'eat, or 'ghostel" claude-code-ide-terminal-backend))))
+
+(defun claude-code-ide--disable-ghostel-title-tracking ()
+  "Disable Ghostel OSC title tracking in the current buffer."
+  (cond
+   ((boundp 'ghostel-set-title-function)
+    (setq-local ghostel-set-title-function nil))
+   ((boundp 'ghostel-enable-title-tracking)
+    (setq-local ghostel-enable-title-tracking nil))))
 
 (defun claude-code-ide--terminal-send-string (string)
   "Send STRING to the terminal in the current buffer."
@@ -991,7 +1000,7 @@ Signals an error if terminal fails to initialize."
           (error "Failed to create ghostel buffer.  Please ensure ghostel is properly installed"))
         (with-current-buffer buffer
           (setq default-directory working-dir)
-          (setq-local ghostel-enable-title-tracking nil)
+          (claude-code-ide--disable-ghostel-title-tracking)
           ;; Let `claude-code-ide--cleanup-on-exit' be the single place that
           ;; kills the buffer.  Otherwise ghostel's sentinel kills the buffer
           ;; first, firing `kill-buffer-hook' → cleanup-on-exit, and then our
@@ -1001,7 +1010,7 @@ Signals an error if terminal fails to initialize."
                  (process (ghostel-exec buffer program args)))
             ;; `ghostel-exec' switches the buffer into `ghostel-mode', which
             ;; resets buffer-local variables.
-            (setq-local ghostel-enable-title-tracking nil)
+            (claude-code-ide--disable-ghostel-title-tracking)
             (setq-local ghostel-kill-buffer-on-exit nil)
             (unless process
               (error "Failed to create ghostel process.  Please ensure ghostel is properly installed"))

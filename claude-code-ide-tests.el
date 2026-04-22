@@ -138,6 +138,7 @@
 
 ;; === Mock ghostel module ===
 (defvar ghostel-buffer-name nil)
+(defvar ghostel-set-title-function #'ignore)
 (defvar ghostel-enable-title-tracking t)
 (defvar ghostel-kill-buffer-on-exit t)
 (defvar ghostel--copy-mode-active nil)
@@ -565,6 +566,7 @@ have completed before cleanup.  Waits up to 5 seconds."
                  (setq mock-ghostel-args args)
                  (setq mock-ghostel-env process-environment)
                  (setq mock-ghostel-default-directory default-directory)
+                 (setq-local ghostel-set-title-function #'ignore)
                  mock-process))
               ((symbol-function 'get-buffer-process)
                (lambda (buffer) mock-process))
@@ -609,6 +611,8 @@ have completed before cleanup.  Waits up to 5 seconds."
             (should (equal mock-ghostel-program "claude"))
             (should (equal mock-ghostel-args '("--print" "hello world")))
             (should (equal mock-ghostel-default-directory "/tmp"))
+            (with-current-buffer mock-ghostel-buffer
+              (should (null ghostel-set-title-function)))
             (should (member "CLAUDE_CODE_SSE_PORT=12345" mock-ghostel-env))
             (should (member "TERM_PROGRAM=emacs" mock-ghostel-env))
             (should (member "FORCE_CODE_TERMINAL=true" mock-ghostel-env))))))))
