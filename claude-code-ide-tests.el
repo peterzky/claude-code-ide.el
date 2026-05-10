@@ -457,6 +457,8 @@ have completed before cleanup.  Waits up to 5 seconds."
               ((symbol-function 'eat-term-send-string)
                (lambda (term str) (setq eat-string-sent str)))
               ((symbol-function 'ghostel--send-key)
+               (lambda (str) (setq ghostel-string-sent str)))
+              ((symbol-function 'ghostel-send-string)
                (lambda (str) (setq ghostel-string-sent str))))
 
       ;; Test vterm backend
@@ -2343,6 +2345,78 @@ have completed before cleanup.  Waits up to 5 seconds."
           (should (not (plist-get file-path-arg :optional)))
           (should (equal (plist-get file-path-arg :description)
                          "Path to the file to analyze for symbols")))))))
+
+;; === Evil-mode integration tests ===
+
+(ert-deftest claude-code-ide-test-evil-setup-ghostel ()
+  "Test that evil-ghostel-mode is activated when evil-mode is active."
+  (let ((claude-code-ide-terminal-backend 'ghostel)
+        (evil-activated nil))
+    (with-temp-buffer
+      ;; Simulate evil-mode being active
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional _filename noerror)
+                   (when (and (eq feature 'evil-ghostel) (not noerror))
+                     ;; Simulate providing evil-ghostel
+                     (provide 'evil-ghostel))
+                   t))
+                ((symbol-function 'evil-ghostel-mode)
+                 (lambda (arg) (setq evil-activated (eq arg 1)))))
+        ;; Set evil-mode to appear active
+        (setq evil-mode t)
+        (claude-code-ide--setup-evil-integration)
+        (should evil-activated)))))
+
+(ert-deftest claude-code-ide-test-evil-setup-vterm ()
+  "Test that vterm-mode gets emacs initial state under evil."
+  (let ((claude-code-ide-terminal-backend 'vterm)
+        (state-set nil))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'evil-set-initial-state)
+                 (lambda (mode state)
+                   (setq state-set (cons mode state)))))
+        (setq evil-mode t)
+        (claude-code-ide--setup-evil-integration)
+        (should (equal state-set '(vterm-mode . emacs)))))))
+
+(ert-deftest claude-code-ide-test-evil-setup-eat ()
+  "Test that eat-mode gets emacs initial state under evil."
+  (let ((claude-code-ide-terminal-backend 'eat)
+        (state-set nil))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'evil-set-initial-state)
+                 (lambda (mode state)
+                   (setq state-set (cons mode state)))))
+        (setq evil-mode t)
+        (claude-code-ide--setup-evil-integration)
+        (should (equal state-set '(eat-mode . emacs)))))))
+
+(ert-deftest claude-code-ide-test-evil-noop-without-evil ()
+  "Test that evil setup is a no-op when evil-mode is not active."
+  (dolist (backend '(vterm eat ghostel))
+    (let ((claude-code-ide-terminal-backend backend)
+          (called nil))
+      (with-temp-buffer
+        (setq evil-mode nil)
+        (cl-letf (((symbol-function 'evil-set-initial-state)
+                   (lambda (_mode _state) (setq called t)))
+                  ((symbol-function 'evil-ghostel-mode)
+                   (lambda (_arg) (setq called t))))
+          (claude-code-ide--setup-evil-integration)
+          (should-not called))))))
+
+(ert-deftest claude-code-ide-test-ghostel-keybindings-on-semi-char-map ()
+  "Test that ghostel keybindings go on ghostel-semi-char-mode-map."
+  (let ((claude-code-ide-terminal-backend 'ghostel))
+    ;; Provide a mock ghostel-semi-char-mode-map
+    (defvar ghostel-semi-char-mode-map)
+    (let ((ghostel-semi-char-mode-map (make-sparse-keymap)))
+      (with-temp-buffer
+        (claude-code-ide--setup-terminal-keybindings)
+        (should (equal (lookup-key ghostel-semi-char-mode-map (kbd "S-<return>"))
+                       #'claude-code-ide-insert-newline))
+        (should (equal (lookup-key ghostel-semi-char-mode-map (kbd "C-<escape>"))
+                       #'claude-code-ide-send-escape))))))
 
 (provide 'claude-code-ide-tests)
 

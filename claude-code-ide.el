@@ -94,8 +94,9 @@
 
 ;; External function declarations for ghostel
 (declare-function ghostel-exec "ghostel" (buffer program &optional args))
-(declare-function ghostel--send-key "ghostel" (key))
+(declare-function ghostel--send-string "ghostel" (string))
 (declare-function ghostel--window-adjust-process-window-size "ghostel" (process windows))
+(declare-function ghostel-send-string "ghostel" (string))
 
 ;;; Customization
 
@@ -497,8 +498,8 @@ cursor management, and process buffering for superior user experience."
     (when eat-terminal
       (eat-term-send-string eat-terminal string)))
    ((eq claude-code-ide-terminal-backend 'ghostel)
-    (if (fboundp 'ghostel--send-key)
-        (ghostel--send-key string)
+    (if (fboundp 'ghostel-send-string)
+        (ghostel-send-string string)
       (when-let ((process (get-buffer-process (current-buffer))))
         (process-send-string process string))))
    (t
@@ -550,23 +551,41 @@ from the window where it was initially created."
 (defun claude-code-ide--setup-terminal-keybindings ()
   "Set up keybindings for the Claude Code terminal buffer.
 This function binds:
-- M-RET (Alt-Return) to insert a newline
-- C-<escape> to send escape"
-  (cond
-   ((eq claude-code-ide-terminal-backend 'vterm)
-    ;; For vterm, we set up local keybindings in vterm-mode-map
-    (local-set-key (kbd "S-<return>") #'claude-code-ide-insert-newline)
-    (local-set-key (kbd "C-<escape>") #'claude-code-ide-send-escape))
-   ((eq claude-code-ide-terminal-backend 'eat)
-    ;; For eat, we need to modify the semi-char mode map which is the default
-    ;; We use local-set-key to make it buffer-local
-    (local-set-key (kbd "S-<return>") #'claude-code-ide-insert-newline)
-    (local-set-key (kbd "C-<escape>") #'claude-code-ide-send-escape))
-   ((eq claude-code-ide-terminal-backend 'ghostel)
-    (local-set-key (kbd "S-<return>") #'claude-code-ide-insert-newline)
-    (local-set-key (kbd "C-<escape>") #'claude-code-ide-send-escape))
-   (t
-    (error "Unknown terminal backend: %s" claude-code-ide-terminal-backend))))
+- S-RET (Shift-Return) to insert a newline
+- C-<escape> to send escape
+
+For ghostel, bindings go directly on `ghostel-semi-char-mode-map'
+because ghostel installs its own local map, shadowing
+`local-set-key' bindings."
+  (let ((newline-key (kbd "S-<return>"))
+        (escape-key (kbd "C-<escape>")))
+    (cond
+     ((eq claude-code-ide-terminal-backend 'vterm)
+      (local-set-key newline-key #'claude-code-ide-insert-newline)
+      (local-set-key escape-key #'claude-code-ide-send-escape))
+     ((eq claude-code-ide-terminal-backend 'eat)
+      (local-set-key newline-key #'claude-code-ide-insert-newline)
+      (local-set-key escape-key #'claude-code-ide-send-escape))
+     ((eq claude-code-ide-terminal-backend 'ghostel)
+      (when (boundp 'ghostel-semi-char-mode-map)
+        (define-key ghostel-semi-char-mode-map newline-key #'claude-code-ide-insert-newline)
+        (define-key ghostel-semi-char-mode-map escape-key #'claude-code-ide-send-escape)))
+     (t
+      (error "Unknown terminal backend: %s" claude-code-ide-terminal-backend)))))
+
+(defun claude-code-ide--setup-evil-integration ()
+  "Configure evil-mode for the current terminal buffer.
+For ghostel: activate `evil-ghostel-mode' if available.
+For vterm/eat: set initial evil state to emacs-state."
+  (when (bound-and-true-p evil-mode)
+    (cond
+     ((eq claude-code-ide-terminal-backend 'ghostel)
+      (when (require 'evil-ghostel nil t)
+        (evil-ghostel-mode 1)))
+     ((eq claude-code-ide-terminal-backend 'vterm)
+      (evil-set-initial-state 'vterm-mode 'emacs))
+     ((eq claude-code-ide-terminal-backend 'eat)
+      (evil-set-initial-state 'eat-mode 'emacs)))))
 
 ;;; Terminal Reflow Glitch Prevention
 ;;
@@ -1101,6 +1120,8 @@ This function handles:
                             nil t)
                   ;; Set up terminal keybindings
                   (claude-code-ide--setup-terminal-keybindings)
+                  ;; Evil-mode integration for terminal buffers
+                  (claude-code-ide--setup-evil-integration)
                   ;; Add terminal-specific exit hooks
                   (cond
                    ((eq claude-code-ide-terminal-backend 'vterm)
@@ -1113,7 +1134,10 @@ This function handles:
                               nil t))
                    ((eq claude-code-ide-terminal-backend 'eat)
                     ;; eat uses kill-buffer-on-exit variable
-                    (setq-local eat-kill-buffer-on-exit t))))
+                    (setq-local eat-kill-buffer-on-exit t))
+                   ((eq claude-code-ide-terminal-backend 'ghostel)
+                    ;; ghostel cleanup handled by chained sentinel + kill-buffer-hook
+                    )))
                 ;; Stabilization period for terminal layout initialization
                 (sleep-for claude-code-ide-terminal-initialization-delay)
                 ;; Display the buffer in a side window
