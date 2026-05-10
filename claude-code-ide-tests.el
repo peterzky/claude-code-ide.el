@@ -2349,47 +2349,56 @@ have completed before cleanup.  Waits up to 5 seconds."
 ;; === Evil-mode integration tests ===
 
 (ert-deftest claude-code-ide-test-evil-setup-ghostel ()
-  "Test that evil-ghostel-mode is activated when evil-mode is active."
+  "Test that evil-ghostel-mode is activated and state switched."
   (let ((claude-code-ide-terminal-backend 'ghostel)
-        (evil-activated nil))
+        (evil-activated nil)
+        (state-changed nil))
     (with-temp-buffer
-      ;; Simulate evil-mode being active
       (cl-letf (((symbol-function 'require)
                  (lambda (feature &optional _filename noerror)
                    (when (and (eq feature 'evil-ghostel) (not noerror))
-                     ;; Simulate providing evil-ghostel
                      (provide 'evil-ghostel))
                    t))
                 ((symbol-function 'evil-ghostel-mode)
-                 (lambda (arg) (setq evil-activated (eq arg 1)))))
-        ;; Set evil-mode to appear active
+                 (lambda (arg) (setq evil-activated (eq arg 1))))
+                ((symbol-function 'evil-change-state)
+                 (lambda (state) (setq state-changed state))))
         (setq evil-mode t)
         (claude-code-ide--setup-evil-integration)
-        (should evil-activated)))))
+        (should evil-activated)
+        (should (eq state-changed 'insert))))))
 
 (ert-deftest claude-code-ide-test-evil-setup-vterm ()
-  "Test that vterm-mode gets emacs initial state under evil."
+  "Test that vterm-mode gets emacs initial state and switches immediately."
   (let ((claude-code-ide-terminal-backend 'vterm)
-        (state-set nil))
+        (state-set nil)
+        (state-switched nil))
     (with-temp-buffer
       (cl-letf (((symbol-function 'evil-set-initial-state)
                  (lambda (mode state)
-                   (setq state-set (cons mode state)))))
+                   (setq state-set (cons mode state))))
+                ((symbol-function 'evil-emacs-state)
+                 (lambda () (setq state-switched t))))
         (setq evil-mode t)
         (claude-code-ide--setup-evil-integration)
-        (should (equal state-set '(vterm-mode . emacs)))))))
+        (should (equal state-set '(vterm-mode . emacs)))
+        (should state-switched)))))
 
 (ert-deftest claude-code-ide-test-evil-setup-eat ()
-  "Test that eat-mode gets emacs initial state under evil."
+  "Test that eat-mode gets emacs initial state and switches immediately."
   (let ((claude-code-ide-terminal-backend 'eat)
-        (state-set nil))
+        (state-set nil)
+        (state-switched nil))
     (with-temp-buffer
       (cl-letf (((symbol-function 'evil-set-initial-state)
                  (lambda (mode state)
-                   (setq state-set (cons mode state)))))
+                   (setq state-set (cons mode state))))
+                ((symbol-function 'evil-emacs-state)
+                 (lambda () (setq state-switched t))))
         (setq evil-mode t)
         (claude-code-ide--setup-evil-integration)
-        (should (equal state-set '(eat-mode . emacs)))))))
+        (should (equal state-set '(eat-mode . emacs)))
+        (should state-switched)))))
 
 (ert-deftest claude-code-ide-test-evil-noop-without-evil ()
   "Test that evil setup is a no-op when evil-mode is not active."

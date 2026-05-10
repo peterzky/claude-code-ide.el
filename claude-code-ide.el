@@ -575,17 +575,25 @@ because ghostel installs its own local map, shadowing
 
 (defun claude-code-ide--setup-evil-integration ()
   "Configure evil-mode for the current terminal buffer.
-For ghostel: activate `evil-ghostel-mode' if available.
-For vterm/eat: set initial evil state to emacs-state."
+For ghostel: activate `evil-ghostel-mode' and switch to insert state.
+For vterm/eat: set initial evil state to emacs-state and switch now."
   (when (bound-and-true-p evil-mode)
     (cond
      ((eq claude-code-ide-terminal-backend 'ghostel)
       (when (require 'evil-ghostel nil t)
-        (evil-ghostel-mode 1)))
+        (evil-ghostel-mode 1)
+        ;; evil-set-initial-state only affects future mode activations.
+        ;; ghostel-mode is already active, so switch state explicitly.
+        (let ((initial-state (bound-and-true-p evil-ghostel-initial-state)))
+          (evil-change-state (or initial-state 'insert)))))
      ((eq claude-code-ide-terminal-backend 'vterm)
-      (evil-set-initial-state 'vterm-mode 'emacs))
+      (evil-set-initial-state 'vterm-mode 'emacs)
+      (when (fboundp 'evil-emacs-state)
+        (evil-emacs-state)))
      ((eq claude-code-ide-terminal-backend 'eat)
-      (evil-set-initial-state 'eat-mode 'emacs)))))
+      (evil-set-initial-state 'eat-mode 'emacs)
+      (when (fboundp 'evil-emacs-state)
+        (evil-emacs-state))))))
 
 ;;; Terminal Reflow Glitch Prevention
 ;;
